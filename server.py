@@ -1,26 +1,30 @@
 """
-ESP32 Cloud OTA Update Server
-==============================
-Deployed on Render.com — runs 24/7 from the cloud.
-ESP32 devices can update from anywhere in the world.
+ESP32 Cloud OTA Update Server — Secured
+========================================
+API key protection for ESP32 endpoints
+Password protection for dashboard upload
 
-Endpoints:
-  GET  /          → Web dashboard
-  GET  /version   → Returns current version (ESP32 polls this)
-  GET  /firmware  → Serves the .bin file (ESP32 downloads this)
-  POST /upload    → Browser uploads new .bin + version
-  GET  /history   → Returns upload history as JSON
+API Key  : ESP32-OTA-1ar0922ec
+Dashboard: #ironman@099
 """
 
 import os
 import json
 import hashlib
+import functools
 from datetime import datetime
-from flask import Flask, request, jsonify, send_file, render_template_string
+from flask import (Flask, request, jsonify, send_file,
+                   render_template_string, session, redirect, url_for)
 
 app = Flask(__name__)
+app.secret_key = "OTA-SESSION-KEY-anurag-2024"
 
-# ── Config ────────────────────────────────────────
+# ── Security Config ───────────────────────────────
+
+API_KEY            = "ESP32-OTA-1ar0922ec"
+DASHBOARD_PASSWORD = "#ironman@099"
+
+# ── Paths ─────────────────────────────────────────
 
 BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 FIRMWARE_DIR = os.path.join(BASE_DIR, "firmware")
@@ -48,24 +52,107 @@ def md5_of_file(path):
             h.update(chunk)
     return h.hexdigest()
 
-# ── ESP32 Endpoints ───────────────────────────────
+# ── Security Decorators ───────────────────────────
+
+def require_api_key(f):
+    """Protects ESP32 endpoints — checks X-API-Key header."""
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        key = request.headers.get("X-API-Key")
+        if not key:
+            return jsonify({"error": "API key missing"}), 401
+        if key != API_KEY:
+            return jsonify({"error": "Invalid API key"}), 403
+        return f(*args, **kwargs)
+    return decorated
+
+def require_login(f):
+    """Protects dashboard pages — checks session login."""
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("logged_in"):
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated
+
+# ── Auth Routes ───────────────────────────────────
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 Cloud OTA — Login</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Syne:wght@700;800&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#0d0f0e; --surface:#141714; --border:#232623; --accent:#39ff8a; --text:#e8ede9; --muted:#5a6b5c; --danger:#ff4f4f; --mono:'JetBrains Mono',monospace; --display:'Syne',sans-serif; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:var(--mono); min-height:100vh; display:flex; align-items:center; justify-content:center; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:40px; width:100%; max-width:380px; }
+  .logo { font-family:var(--display); font-size:22px; font-weight:800; margin-bottom:8px; }
+  .logo span { color:var(--accent); }
+  .sub { color:var(--muted); font-size:12px; margin-bottom:32px; }
+  label { font-size:11px; text-transform:uppercase; letter-spacing:2px; color:var(--muted); display:block; margin-bottom:8px; }
+  input { width:100%; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--mono); font-size:14px; padding:12px 14px; outline:none; transition:border-color .2s; margin-bottom:20px; }
+  input:focus { border-color:var(--accent); }
+  button { width:100%; background:var(--accent); color:#000; border:none; border-radius:6px; font-family:var(--display); font-size:15px; font-weight:700; padding:12px; cursor:pointer; transition:opacity .2s; }
+  button:hover { opacity:.85; }
+  .error { background:#1a0a0a; border:1px solid var(--danger); border-radius:6px; padding:10px 14px; color:var(--danger); font-size:12px; margin-bottom:20px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">ESP32 <span>Cloud</span> OTA</div>
+  <div class="sub">Enter password to access dashboard</div>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="POST">
+    <label>Password</label>
+    <input type="password" name="password" placeholder="Enter dashboard password" autofocus>
+    <button type="submit">Login</button>
+  </form>
+</div>
+</body>
+</html>"""
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        if request.form.get("password") == DASHBOARD_PASSWORD:
+            session["logged_in"] = True
+            return redirect(url_for("dashboard"))
+        error = "Wrong password. Try again."
+    return render_template_string(LOGIN_HTML, error=error)
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+# ── ESP32 Endpoints (API key protected) ───────────
 
 @app.route("/version")
+@require_api_key
 def get_version():
+    """ESP32 polls this with API key to check version."""
     meta = load_meta()
     return jsonify({"version": meta["version"]})
 
 @app.route("/firmware")
+@require_api_key
 def get_firmware():
+    """ESP32 downloads firmware with API key."""
     if not os.path.exists(BIN_PATH):
         return jsonify({"error": "No firmware uploaded yet"}), 404
     return send_file(BIN_PATH, mimetype="application/octet-stream",
                      as_attachment=True, download_name="firmware.bin")
 
-# ── Browser Endpoints ─────────────────────────────
+# ── Browser Endpoints (login protected) ───────────
 
 @app.route("/upload", methods=["POST"])
+@require_login
 def upload_firmware():
+    """Dashboard uploads new firmware — login required."""
     if "file" not in request.files:
         return jsonify({"error": "No file in request"}), 400
     file    = request.files["file"]
@@ -92,11 +179,12 @@ def upload_firmware():
     return jsonify({"ok": True, "version": version, "size_kb": size_kb, "md5": md5})
 
 @app.route("/history")
+@require_login
 def get_history():
     meta = load_meta()
     return jsonify(meta.get("history", []))
 
-# ── Dashboard ─────────────────────────────────────
+# ── Dashboard (login protected) ───────────────────
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -109,12 +197,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   :root { --bg:#0d0f0e; --surface:#141714; --border:#232623; --accent:#39ff8a; --accent2:#00c8ff; --text:#e8ede9; --muted:#5a6b5c; --danger:#ff4f4f; --radius:10px; --mono:'JetBrains Mono',monospace; --display:'Syne',sans-serif; }
   * { box-sizing:border-box; margin:0; padding:0; }
   body { background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px; min-height:100vh; padding:40px 24px; }
-  header { display:flex; align-items:flex-end; justify-content:space-between; margin-bottom:40px; padding-bottom:20px; border-bottom:1px solid var(--border); }
+  header { display:flex; align-items:center; justify-content:space-between; margin-bottom:40px; padding-bottom:20px; border-bottom:1px solid var(--border); }
   .logo { font-family:var(--display); font-size:26px; font-weight:800; letter-spacing:-0.5px; }
   .logo span { color:var(--accent); }
+  .header-right { display:flex; align-items:center; gap:12px; }
   .cloud-badge { display:flex; align-items:center; gap:8px; background:var(--surface); border:1px solid var(--border); border-radius:999px; padding:6px 14px; font-size:12px; color:var(--muted); }
   .dot { width:8px; height:8px; border-radius:50%; background:var(--accent); animation:pulse 2s ease-in-out infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .logout-btn { background:transparent; border:1px solid var(--border); border-radius:6px; color:var(--muted); font-family:var(--mono); font-size:12px; padding:6px 14px; cursor:pointer; transition:border-color .2s,color .2s; text-decoration:none; }
+  .logout-btn:hover { border-color:var(--danger); color:var(--danger); }
   .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }
   @media(max-width:700px){.grid{grid-template-columns:1fr}}
   .card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; }
@@ -140,7 +231,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .ver-input { flex:1; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--mono); font-size:14px; padding:10px 14px; outline:none; transition:border-color .2s; }
   .ver-input:focus { border-color:var(--accent); }
   .ver-input::placeholder { color:var(--muted); }
-  .upload-btn { background:var(--accent); color:#000; border:none; border-radius:6px; font-family:var(--display); font-size:14px; font-weight:700; padding:10px 24px; cursor:pointer; transition:opacity .2s,transform .1s; white-space:nowrap; }
+  .upload-btn { background:var(--accent); color:#000; border:none; border-radius:6px; font-family:var(--display); font-size:14px; font-weight:700; padding:10px 24px; cursor:pointer; transition:opacity .2s; white-space:nowrap; }
   .upload-btn:hover { opacity:.85; }
   .upload-btn:disabled { opacity:.4; cursor:not-allowed; }
   .toast { display:none; position:fixed; bottom:24px; right:24px; padding:12px 20px; border-radius:8px; font-size:13px; font-weight:600; z-index:999; }
@@ -158,17 +249,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .progress-wrap.active { display:block; }
   .url-card { grid-column:1/-1; background:#0e3a2a; border:1px solid var(--accent); }
   .url-display { font-size:14px; color:var(--accent); margin-top:8px; word-break:break-all; }
+  .security-card { grid-column:1/-1; background:#1a2e3a; border:1px solid var(--accent2); }
+  .security-card .card-label { color:var(--accent2); }
+  .key-display { font-size:13px; color:var(--accent2); margin-top:8px; font-family:var(--mono); background:var(--bg); padding:10px 14px; border-radius:6px; border:1px solid var(--border); }
 </style>
 </head>
 <body>
 <header>
   <div class="logo">ESP32 <span>Cloud</span> OTA</div>
-  <div class="cloud-badge"><div class="dot"></div>Cloud — Online 24/7</div>
+  <div class="header-right">
+    <div class="cloud-badge"><div class="dot"></div>Secured — Online 24/7</div>
+    <a href="/logout" class="logout-btn">Logout</a>
+  </div>
 </header>
 <div class="grid">
   <div class="card url-card">
-    <div class="card-label">Your cloud URL — paste this in your ESP32 sketch</div>
+    <div class="card-label">Your cloud URL — use this in your ESP32 sketch</div>
     <div class="url-display" id="server-url"></div>
+  </div>
+  <div class="card security-card">
+    <div class="card-label">API key — send this in every ESP32 request header</div>
+    <div class="key-display">X-API-Key: ESP32-OTA-1ar0922ec</div>
   </div>
   <div class="card">
     <div class="card-label">Current firmware version</div>
@@ -178,9 +279,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="card">
     <div class="card-label">ESP32 endpoints</div>
     <div class="endpoint-list">
-      <div class="endpoint"><span class="method get">GET</span><span>/version</span><span class="ep-desc">Version check</span></div>
-      <div class="endpoint"><span class="method get">GET</span><span>/firmware</span><span class="ep-desc">Download .bin</span></div>
-      <div class="endpoint"><span class="method post">POST</span><span>/upload</span><span class="ep-desc">Upload firmware</span></div>
+      <div class="endpoint"><span class="method get">GET</span><span>/version</span><span class="ep-desc">API key required</span></div>
+      <div class="endpoint"><span class="method get">GET</span><span>/firmware</span><span class="ep-desc">API key required</span></div>
+      <div class="endpoint"><span class="method post">POST</span><span>/upload</span><span class="ep-desc">Login required</span></div>
     </div>
   </div>
   <div class="card full">
@@ -245,7 +346,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     xhr.open('POST','/upload');xhr.send(fd);
   }
   function loadVer(){
-    fetch('/version').then(r=>r.json()).then(d=>{
+    fetch('/version',{headers:{'X-API-Key':'ESP32-OTA-1ar0922ec'}}).then(r=>r.json()).then(d=>{
       const el=document.getElementById('ver-display');
       const sub=document.getElementById('ver-sub');
       if(d.version==='none'){el.textContent='—';sub.textContent='No firmware uploaded yet'}
@@ -269,6 +370,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </html>"""
 
 @app.route("/")
+@require_login
 def dashboard():
     return render_template_string(DASHBOARD_HTML)
 
