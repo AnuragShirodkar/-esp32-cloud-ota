@@ -9,9 +9,10 @@
 // ═══════════════════════════════════════════════════
 
 #include <WiFi.h>
+
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
-#include <ArduinoOTA.h>
+
 
 // ── Wi-Fi Credentials ────────────────────────────
 const char* ssid         = "Airtel_m000_6317";

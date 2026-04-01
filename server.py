@@ -139,13 +139,18 @@ def get_version():
     return jsonify({"version": meta["version"]})
 
 @app.route("/firmware")
-@require_api_key
 def get_firmware():
-    """ESP32 downloads firmware with API key."""
+    # Accept key from header OR URL parameter
+    key = request.headers.get("X-API-Key") or request.args.get("key")
+    if not key:
+        return jsonify({"error": "API key missing"}), 401
+    if key != API_KEY:
+        return jsonify({"error": "Invalid API key"}), 403
     if not os.path.exists(BIN_PATH):
         return jsonify({"error": "No firmware uploaded yet"}), 404
     return send_file(BIN_PATH, mimetype="application/octet-stream",
                      as_attachment=True, download_name="firmware.bin")
+    
 
 # ── Browser Endpoints (login protected) ───────────
 
