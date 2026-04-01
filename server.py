@@ -1,8 +1,9 @@
 """
-ESP32 Cloud OTA Update Server — Secured
-========================================
-API key protection for ESP32 endpoints
-Password protection for dashboard upload
+ESP32 Cloud OTA Update Server — Multi Device
+=============================================
+Tracks multiple ESP32 devices automatically.
+Each device checks in with name, MAC, version.
+Dashboard shows all devices with status.
 
 API Key  : ESP32-OTA-1ar0922ec
 Dashboard: #ironman@099
@@ -12,7 +13,7 @@ import os
 import json
 import hashlib
 import functools
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import (Flask, request, jsonify, send_file,
                    render_template_string, session, redirect, url_for)
 
@@ -30,6 +31,7 @@ BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 FIRMWARE_DIR = os.path.join(BASE_DIR, "firmware")
 BIN_PATH     = os.path.join(FIRMWARE_DIR, "firmware.bin")
 META_PATH    = os.path.join(FIRMWARE_DIR, "meta.json")
+DEVICES_PATH = os.path.join(FIRMWARE_DIR, "devices.json")
 
 os.makedirs(FIRMWARE_DIR, exist_ok=True)
 
@@ -45,6 +47,16 @@ def save_meta(meta):
     with open(META_PATH, "w") as f:
         json.dump(meta, f, indent=2)
 
+def load_devices():
+    if not os.path.exists(DEVICES_PATH):
+        return {}
+    with open(DEVICES_PATH) as f:
+        return json.load(f)
+
+def save_devices(devices):
+    with open(DEVICES_PATH, "w") as f:
+        json.dump(devices, f, indent=2)
+
 def md5_of_file(path):
     h = hashlib.md5()
     with open(path, "rb") as f:
@@ -52,10 +64,31 @@ def md5_of_file(path):
             h.update(chunk)
     return h.hexdigest()
 
+def register_device(req):
+    """Registers or updates a device from request headers."""
+    mac     = req.headers.get("X-Device-MAC", "unknown")
+    name    = req.headers.get("X-Device-Name", "Unknown Device")
+    version = req.headers.get("X-FW-Version", "unknown")
+
+    if mac == "unknown":
+        return
+
+    devices = load_devices()
+    now     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    devices[mac] = {
+        "name":       name,
+        "mac":        mac,
+        "version":    version,
+        "last_seen":  now,
+        "ip":         req.remote_addr or "unknown"
+    }
+
+    save_devices(devices)
+
 # ── Security Decorators ───────────────────────────
 
 def require_api_key(f):
-    """Protects ESP32 endpoints — checks X-API-Key header."""
     @functools.wraps(f)
     def decorated(*args, **kwargs):
         key = request.headers.get("X-API-Key")
@@ -67,7 +100,6 @@ def require_api_key(f):
     return decorated
 
 def require_login(f):
-    """Protects dashboard pages — checks session login."""
     @functools.wraps(f)
     def decorated(*args, **kwargs):
         if not session.get("logged_in"):
@@ -129,18 +161,26 @@ def logout():
     session.clear()
     return redirect(url_for("login"))
 
-# ── ESP32 Endpoints (API key protected) ───────────
+# ── ESP32 Endpoints ───────────────────────────────
+
+@app.route("/checkin", methods=["POST"])
+@require_api_key
+def checkin():
+    """ESP32 checks in — registers device on server."""
+    register_device(request)
+    return jsonify({"ok": True})
 
 @app.route("/version")
 @require_api_key
 def get_version():
-    """ESP32 polls this with API key to check version."""
+    """ESP32 polls this to check version."""
+    register_device(request)
     meta = load_meta()
     return jsonify({"version": meta["version"]})
 
 @app.route("/firmware")
 def get_firmware():
-    # Accept key from header OR URL parameter
+    """ESP32 downloads firmware."""
     key = request.headers.get("X-API-Key") or request.args.get("key")
     if not key:
         return jsonify({"error": "API key missing"}), 401
@@ -150,13 +190,12 @@ def get_firmware():
         return jsonify({"error": "No firmware uploaded yet"}), 404
     return send_file(BIN_PATH, mimetype="application/octet-stream",
                      as_attachment=True, download_name="firmware.bin")
-  
-# ── Browser Endpoints (login protected) ───────────
+
+# ── Browser Endpoints ─────────────────────────────
 
 @app.route("/upload", methods=["POST"])
 @require_login
 def upload_firmware():
-    """Dashboard uploads new firmware — login required."""
     if "file" not in request.files:
         return jsonify({"error": "No file in request"}), 400
     file    = request.files["file"]
@@ -188,7 +227,13 @@ def get_history():
     meta = load_meta()
     return jsonify(meta.get("history", []))
 
-# ── Dashboard (login protected) ───────────────────
+@app.route("/devices")
+@require_login
+def get_devices():
+    devices = load_devices()
+    return jsonify(list(devices.values()))
+
+# ── Dashboard ─────────────────────────────────────
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -198,7 +243,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>ESP32 Cloud OTA</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
 <style>
-  :root { --bg:#0d0f0e; --surface:#141714; --border:#232623; --accent:#39ff8a; --accent2:#00c8ff; --text:#e8ede9; --muted:#5a6b5c; --danger:#ff4f4f; --radius:10px; --mono:'JetBrains Mono',monospace; --display:'Syne',sans-serif; }
+  :root { --bg:#0d0f0e; --surface:#141714; --border:#232623; --accent:#39ff8a; --accent2:#00c8ff; --text:#e8ede9; --muted:#5a6b5c; --danger:#ff4f4f; --warning:#f5a623; --radius:10px; --mono:'JetBrains Mono',monospace; --display:'Syne',sans-serif; }
   * { box-sizing:border-box; margin:0; padding:0; }
   body { background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px; min-height:100vh; padding:40px 24px; }
   header { display:flex; align-items:center; justify-content:space-between; margin-bottom:40px; padding-bottom:20px; border-bottom:1px solid var(--border); }
@@ -208,20 +253,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .cloud-badge { display:flex; align-items:center; gap:8px; background:var(--surface); border:1px solid var(--border); border-radius:999px; padding:6px 14px; font-size:12px; color:var(--muted); }
   .dot { width:8px; height:8px; border-radius:50%; background:var(--accent); animation:pulse 2s ease-in-out infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
-  .logout-btn { background:transparent; border:1px solid var(--border); border-radius:6px; color:var(--muted); font-family:var(--mono); font-size:12px; padding:6px 14px; cursor:pointer; transition:border-color .2s,color .2s; text-decoration:none; }
+  .logout-btn { background:transparent; border:1px solid var(--border); border-radius:6px; color:var(--muted); font-family:var(--mono); font-size:12px; padding:6px 14px; cursor:pointer; text-decoration:none; transition:border-color .2s,color .2s; }
   .logout-btn:hover { border-color:var(--danger); color:var(--danger); }
   .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }
   @media(max-width:700px){.grid{grid-template-columns:1fr}}
   .card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; }
   .card-label { font-size:10px; text-transform:uppercase; letter-spacing:2px; color:var(--muted); margin-bottom:10px; }
   .version-display { font-family:var(--display); font-size:48px; font-weight:800; color:var(--accent); line-height:1; letter-spacing:-1px; }
+  .full { grid-column:1/-1; }
   .endpoint-list { display:flex; flex-direction:column; gap:8px; }
   .endpoint { display:flex; align-items:center; gap:10px; padding:8px 12px; background:var(--bg); border-radius:6px; border:1px solid var(--border); }
   .method { font-size:10px; font-weight:600; padding:2px 6px; border-radius:4px; min-width:36px; text-align:center; }
   .get { background:#0e3a2a; color:var(--accent); }
   .post { background:#1a2e3a; color:var(--accent2); }
   .ep-desc { color:var(--muted); margin-left:auto; font-size:11px; }
-  .full { grid-column:1/-1; }
   .drop-zone { border:2px dashed var(--border); border-radius:var(--radius); padding:36px; text-align:center; cursor:pointer; transition:border-color .2s,background .2s; margin-bottom:16px; }
   .drop-zone.dragover { border-color:var(--accent); background:#0d1f13; }
   .drop-zone input { display:none; }
@@ -241,6 +286,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .toast { display:none; position:fixed; bottom:24px; right:24px; padding:12px 20px; border-radius:8px; font-size:13px; font-weight:600; z-index:999; }
   .toast.success { background:var(--accent); color:#000; display:block; }
   .toast.error { background:var(--danger); color:#fff; display:block; }
+  .progress-wrap { display:none; height:4px; background:var(--border); border-radius:2px; margin-top:12px; overflow:hidden; }
+  .progress-bar { height:100%; background:var(--accent); width:0%; transition:width .3s; }
+  .progress-wrap.active { display:block; }
+  .url-card { grid-column:1/-1; background:#0e3a2a; border:1px solid var(--accent); }
+  .url-display { font-size:14px; color:var(--accent); margin-top:8px; word-break:break-all; }
+
+  /* Device table */
+  .devices-card { grid-column:1/-1; }
+  .device-count { font-family:var(--display); font-size:32px; font-weight:800; color:var(--accent2); line-height:1; margin-bottom:4px; }
+  .device-count-sub { color:var(--muted); font-size:11px; margin-bottom:16px; }
+  .device-table { width:100%; border-collapse:collapse; }
+  .device-table th { text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:2px; color:var(--muted); padding:8px 12px; border-bottom:1px solid var(--border); }
+  .device-table td { padding:12px 12px; border-bottom:1px solid var(--border); vertical-align:middle; }
+  .device-table tr:last-child td { border-bottom:none; }
+  .device-name { font-family:var(--display); font-size:15px; font-weight:700; color:var(--text); }
+  .device-mac { color:var(--muted); font-size:11px; margin-top:3px; }
+  .status-online { display:inline-flex; align-items:center; gap:6px; color:var(--accent); font-size:12px; }
+  .status-offline { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
+  .status-dot { width:7px; height:7px; border-radius:50%; }
+  .status-dot.online { background:var(--accent); animation:pulse 2s ease-in-out infinite; }
+  .status-dot.offline { background:var(--muted); }
+  .ver-badge { display:inline-block; padding:3px 10px; border-radius:4px; font-size:11px; }
+  .ver-up-to-date { background:#0e3a2a; color:var(--accent); }
+  .ver-outdated { background:#2a1a0e; color:var(--warning); }
+  .last-seen { color:var(--muted); font-size:11px; }
+  .empty-devices { color:var(--muted); text-align:center; padding:32px; }
+  .refresh-btn { background:transparent; border:1px solid var(--border); border-radius:6px; color:var(--muted); font-family:var(--mono); font-size:11px; padding:4px 12px; cursor:pointer; transition:border-color .2s; float:right; margin-top:-2px; }
+  .refresh-btn:hover { border-color:var(--accent2); color:var(--accent2); }
+
+  /* History */
   .history-table { width:100%; border-collapse:collapse; }
   .history-table th { text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:2px; color:var(--muted); padding:8px 12px; border-bottom:1px solid var(--border); }
   .history-table td { padding:10px 12px; border-bottom:1px solid var(--border); }
@@ -248,14 +323,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .history-table tr:first-child td { color:var(--accent); }
   .badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; background:#0e3a2a; color:var(--accent); }
   .empty { color:var(--muted); text-align:center; padding:24px; }
-  .progress-wrap { display:none; height:4px; background:var(--border); border-radius:2px; margin-top:12px; overflow:hidden; }
-  .progress-bar { height:100%; background:var(--accent); width:0%; transition:width .3s; }
-  .progress-wrap.active { display:block; }
-  .url-card { grid-column:1/-1; background:#0e3a2a; border:1px solid var(--accent); }
-  .url-display { font-size:14px; color:var(--accent); margin-top:8px; word-break:break-all; }
-  .security-card { grid-column:1/-1; background:#1a2e3a; border:1px solid var(--accent2); }
-  .security-card .card-label { color:var(--accent2); }
-  .key-display { font-size:13px; color:var(--accent2); margin-top:8px; font-family:var(--mono); background:var(--bg); padding:10px 14px; border-radius:6px; border:1px solid var(--border); }
 </style>
 </head>
 <body>
@@ -267,27 +334,38 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </header>
 <div class="grid">
+
   <div class="card url-card">
     <div class="card-label">Your cloud URL — use this in your ESP32 sketch</div>
     <div class="url-display" id="server-url"></div>
   </div>
-  <div class="card security-card">
-    <div class="card-label">API key — send this in every ESP32 request header</div>
-    <div class="key-display">X-API-Key: ESP32-OTA-1ar0922ec</div>
-  </div>
+
   <div class="card">
     <div class="card-label">Current firmware version</div>
     <div class="version-display" id="ver-display">—</div>
     <div style="color:var(--muted);margin-top:12px;font-size:11px" id="ver-sub">Fetching...</div>
   </div>
+
   <div class="card">
     <div class="card-label">ESP32 endpoints</div>
     <div class="endpoint-list">
       <div class="endpoint"><span class="method get">GET</span><span>/version</span><span class="ep-desc">API key required</span></div>
       <div class="endpoint"><span class="method get">GET</span><span>/firmware</span><span class="ep-desc">API key required</span></div>
+      <div class="endpoint"><span class="method post">POST</span><span>/checkin</span><span class="ep-desc">Device registration</span></div>
       <div class="endpoint"><span class="method post">POST</span><span>/upload</span><span class="ep-desc">Login required</span></div>
     </div>
   </div>
+
+  <!-- Devices -->
+  <div class="card devices-card">
+    <div class="card-label">
+      Connected devices
+      <button class="refresh-btn" onclick="loadDevices()">↻ Refresh</button>
+    </div>
+    <div id="devices-container"><div class="empty-devices">No devices registered yet</div></div>
+  </div>
+
+  <!-- Upload -->
   <div class="card full">
     <div class="card-label">Upload new firmware</div>
     <div class="drop-zone" id="drop-zone" onclick="document.getElementById('fi').click()">
@@ -303,26 +381,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="progress-wrap" id="pw"><div class="progress-bar" id="pb"></div></div>
   </div>
+
+  <!-- History -->
   <div class="card full">
     <div class="card-label">Upload history</div>
     <div id="history"><div class="empty">No uploads yet</div></div>
   </div>
+
 </div>
 <div class="toast" id="toast"></div>
 <script>
   document.getElementById('server-url').textContent = window.location.origin;
   let file = null;
   const zone = document.getElementById('drop-zone');
-  const fi = document.getElementById('fi');
+  const fi   = document.getElementById('fi');
+
   zone.addEventListener('dragover', e=>{e.preventDefault();zone.classList.add('dragover')});
   zone.addEventListener('dragleave', ()=>zone.classList.remove('dragover'));
   zone.addEventListener('drop', e=>{e.preventDefault();zone.classList.remove('dragover');if(e.dataTransfer.files[0])setFile(e.dataTransfer.files[0])});
   fi.addEventListener('change', ()=>{if(fi.files[0])setFile(fi.files[0])});
+
   function setFile(f){
     if(!f.name.endsWith('.bin')){toast('Only .bin files accepted','error');return}
     file=f;zone.classList.add('has-file');
     document.getElementById('file-info').textContent=`${f.name} · ${(f.size/1024).toFixed(1)} KB`;
   }
+
   function doUpload(){
     const v=document.getElementById('ver-in').value.trim();
     if(!file){toast('Select a .bin file','error');return}
@@ -343,32 +427,101 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         file=null;zone.classList.remove('has-file');
         document.getElementById('file-info').textContent='';
         document.getElementById('ver-in').value='';fi.value='';
-        loadVer();loadHistory();
+        loadVer();loadHistory();loadDevices();
       } else toast(JSON.parse(xhr.responseText).error||'Upload failed','error');
     };
     xhr.onerror=()=>{btn.disabled=false;btn.textContent='Upload';toast('Network error','error')};
     xhr.open('POST','/upload');xhr.send(fd);
   }
+
   function loadVer(){
-    fetch('/version',{headers:{'X-API-Key':'ESP32-OTA-1ar0922ec'}}).then(r=>r.json()).then(d=>{
-      const el=document.getElementById('ver-display');
-      const sub=document.getElementById('ver-sub');
-      if(d.version==='none'){el.textContent='—';sub.textContent='No firmware uploaded yet'}
-      else{el.textContent='v'+d.version;sub.textContent='Ready to serve to ESP32 devices worldwide'}
+    fetch('/version',{headers:{'X-API-Key':'ESP32-OTA-1ar0922ec'}})
+      .then(r=>r.json()).then(d=>{
+        const el=document.getElementById('ver-display');
+        const sub=document.getElementById('ver-sub');
+        if(d.version==='none'){el.textContent='—';sub.textContent='No firmware uploaded yet'}
+        else{el.textContent='v'+d.version;sub.textContent='Ready to serve to ESP32 devices worldwide'}
+      });
+  }
+
+  function loadDevices(){
+    fetch('/devices').then(r=>r.json()).then(devices=>{
+      const c = document.getElementById('devices-container');
+      if(!devices.length){
+        c.innerHTML='<div class="empty-devices">No devices registered yet — flash a device to see it here</div>';
+        return;
+      }
+
+      const serverVer = document.getElementById('ver-display').textContent.replace('v','');
+
+      c.innerHTML = `
+        <table class="device-table">
+          <thead>
+            <tr>
+              <th>Device</th>
+              <th>Status</th>
+              <th>Firmware</th>
+              <th>IP Address</th>
+              <th>Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${devices.map(d => {
+              const lastSeen = new Date(d.last_seen);
+              const now = new Date();
+              const diffMin = Math.floor((now - lastSeen) / 60000);
+              const isOnline = diffMin < 2;
+              const isUpToDate = d.version === serverVer;
+
+              return `<tr>
+                <td>
+                  <div class="device-name">${d.name}</div>
+                  <div class="device-mac">${d.mac}</div>
+                </td>
+                <td>
+                  <span class="${isOnline ? 'status-online' : 'status-offline'}">
+                    <span class="status-dot ${isOnline ? 'online' : 'offline'}"></span>
+                    ${isOnline ? 'Online' : 'Offline'}
+                  </span>
+                </td>
+                <td>
+                  <span class="ver-badge ${isUpToDate ? 'ver-up-to-date' : 'ver-outdated'}">
+                    v${d.version} ${isUpToDate ? '✓' : '↑ update available'}
+                  </span>
+                </td>
+                <td style="color:var(--muted);font-size:12px">${d.ip}</td>
+                <td class="last-seen">${d.last_seen}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>`;
     });
   }
+
   function loadHistory(){
     fetch('/history').then(r=>r.json()).then(rows=>{
       const c=document.getElementById('history');
       if(!rows.length){c.innerHTML='<div class="empty">No uploads yet</div>';return}
-      c.innerHTML=`<table class="history-table"><thead><tr><th>Version</th><th>File</th><th>Size</th><th>MD5</th><th>Uploaded</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td><span class="badge">${r.version}</span>${i===0?' ← current':''}</td><td>${r.filename}</td><td>${r.size_kb} KB</td><td style="font-size:11px;color:var(--muted)">${r.md5.slice(0,12)}…</td><td style="color:var(--muted)">${r.uploaded}</td></tr>`).join('')}</tbody></table>`;
+      c.innerHTML=`<table class="history-table">
+        <thead><tr><th>Version</th><th>File</th><th>Size</th><th>MD5</th><th>Uploaded</th></tr></thead>
+        <tbody>${rows.map((r,i)=>`<tr>
+          <td><span class="badge">${r.version}</span>${i===0?' ← current':''}</td>
+          <td>${r.filename}</td><td>${r.size_kb} KB</td>
+          <td style="font-size:11px;color:var(--muted)">${r.md5.slice(0,12)}…</td>
+          <td style="color:var(--muted)">${r.uploaded}</td>
+        </tr>`).join('')}</tbody>
+      </table>`;
     });
   }
+
   function toast(msg,type){
     const t=document.getElementById('toast');t.textContent=msg;t.className='toast '+type;
     clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast',3500);
   }
-  loadVer();loadHistory();
+
+  // Auto refresh devices every 30 seconds
+  loadVer();loadHistory();loadDevices();
+  setInterval(loadDevices, 30000);
 </script>
 </body>
 </html>"""
