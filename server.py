@@ -1,9 +1,10 @@
 """
-ESP32 Cloud OTA Update Server — Multi Device
-=============================================
-Tracks multiple ESP32 devices automatically.
-Each device checks in with name, MAC, version.
-Dashboard shows all devices with status.
+ESP32 Cloud OTA — MAC Based Device Management
+===============================================
+Devices identified by MAC address.
+Names assigned from dashboard registration page.
+Main dashboard shows named devices only.
+Registration page shows unnamed devices.
 
 API Key  : ESP32-OTA-1ar0922ec
 Dashboard: #ironman@099
@@ -13,25 +14,26 @@ import os
 import json
 import hashlib
 import functools
-from datetime import datetime, timezone
+from datetime import datetime
 from flask import (Flask, request, jsonify, send_file,
                    render_template_string, session, redirect, url_for)
 
 app = Flask(__name__)
 app.secret_key = "OTA-SESSION-KEY-anurag-2024"
 
-# ── Security Config ───────────────────────────────
+# ── Security ──────────────────────────────────────
 
 API_KEY            = "ESP32-OTA-1ar0922ec"
 DASHBOARD_PASSWORD = "#ironman@099"
 
 # ── Paths ─────────────────────────────────────────
 
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-FIRMWARE_DIR = os.path.join(BASE_DIR, "firmware")
-BIN_PATH     = os.path.join(FIRMWARE_DIR, "firmware.bin")
-META_PATH    = os.path.join(FIRMWARE_DIR, "meta.json")
-DEVICES_PATH = os.path.join(FIRMWARE_DIR, "devices.json")
+BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
+FIRMWARE_DIR  = os.path.join(BASE_DIR, "firmware")
+BIN_PATH      = os.path.join(FIRMWARE_DIR, "firmware.bin")
+META_PATH     = os.path.join(FIRMWARE_DIR, "meta.json")
+DEVICES_PATH  = os.path.join(FIRMWARE_DIR, "devices.json")
+REGISTRY_PATH = os.path.join(FIRMWARE_DIR, "registry.json")
 
 os.makedirs(FIRMWARE_DIR, exist_ok=True)
 
@@ -57,6 +59,17 @@ def save_devices(devices):
     with open(DEVICES_PATH, "w") as f:
         json.dump(devices, f, indent=2)
 
+def load_registry():
+    """MAC → friendly name mapping."""
+    if not os.path.exists(REGISTRY_PATH):
+        return {}
+    with open(REGISTRY_PATH) as f:
+        return json.load(f)
+
+def save_registry(registry):
+    with open(REGISTRY_PATH, "w") as f:
+        json.dump(registry, f, indent=2)
+
 def md5_of_file(path):
     h = hashlib.md5()
     with open(path, "rb") as f:
@@ -65,23 +78,23 @@ def md5_of_file(path):
     return h.hexdigest()
 
 def register_device(req):
-    """Registers or updates a device from request headers."""
+    """Updates device record from request headers."""
     mac     = req.headers.get("X-Device-MAC", "unknown")
-    name    = req.headers.get("X-Device-Name", "Unknown Device")
     version = req.headers.get("X-FW-Version", "unknown")
 
     if mac == "unknown":
         return
 
-    devices = load_devices()
-    now     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    devices  = load_devices()
+    registry = load_registry()
+    now      = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     devices[mac] = {
-        "name":       name,
-        "mac":        mac,
-        "version":    version,
-        "last_seen":  now,
-        "ip":         req.remote_addr or "unknown"
+        "mac":       mac,
+        "name":      registry.get(mac, None),
+        "version":   version,
+        "last_seen": now,
+        "ip":        req.remote_addr or "unknown"
     }
 
     save_devices(devices)
@@ -107,7 +120,7 @@ def require_login(f):
         return f(*args, **kwargs)
     return decorated
 
-# ── Auth Routes ───────────────────────────────────
+# ── Auth ──────────────────────────────────────────
 
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -166,21 +179,18 @@ def logout():
 @app.route("/checkin", methods=["POST"])
 @require_api_key
 def checkin():
-    """ESP32 checks in — registers device on server."""
     register_device(request)
     return jsonify({"ok": True})
 
 @app.route("/version")
 @require_api_key
 def get_version():
-    """ESP32 polls this to check version."""
     register_device(request)
     meta = load_meta()
     return jsonify({"version": meta["version"]})
 
 @app.route("/firmware")
 def get_firmware():
-    """ESP32 downloads firmware."""
     key = request.headers.get("X-API-Key") or request.args.get("key")
     if not key:
         return jsonify({"error": "API key missing"}), 401
@@ -227,13 +237,184 @@ def get_history():
     meta = load_meta()
     return jsonify(meta.get("history", []))
 
-@app.route("/devices")
+@app.route("/devices/named")
 @require_login
-def get_devices():
-    devices = load_devices()
-    return jsonify(list(devices.values()))
+def get_named_devices():
+    """Returns only named devices for main dashboard."""
+    devices  = load_devices()
+    registry = load_registry()
+    named    = []
+    for mac, d in devices.items():
+        if mac in registry:
+            named.append({**d, "name": registry[mac]})
+    return jsonify(named)
 
-# ── Dashboard ─────────────────────────────────────
+@app.route("/devices/unnamed")
+@require_login
+def get_unnamed_devices():
+    """Returns only unnamed devices for registration page."""
+    devices  = load_devices()
+    registry = load_registry()
+    unnamed  = []
+    for mac, d in devices.items():
+        if mac not in registry:
+            unnamed.append(d)
+    return jsonify(unnamed)
+
+@app.route("/devices/register", methods=["POST"])
+@require_login
+def register_device_name():
+    """Assigns a friendly name to a MAC address."""
+    data = request.get_json()
+    mac  = data.get("mac", "").strip()
+    name = data.get("name", "").strip()
+    if not mac or not name:
+        return jsonify({"error": "MAC and name required"}), 400
+    registry = load_registry()
+    registry[mac] = name
+    save_registry(registry)
+
+    # Update device record too
+    devices = load_devices()
+    if mac in devices:
+        devices[mac]["name"] = name
+        save_devices(devices)
+
+    print(f"[Registry] {mac} → {name}")
+    return jsonify({"ok": True, "mac": mac, "name": name})
+
+@app.route("/devices/rename", methods=["POST"])
+@require_login
+def rename_device():
+    """Renames an already named device."""
+    data = request.get_json()
+    mac  = data.get("mac", "").strip()
+    name = data.get("name", "").strip()
+    if not mac or not name:
+        return jsonify({"error": "MAC and name required"}), 400
+    registry = load_registry()
+    registry[mac] = name
+    save_registry(registry)
+    devices = load_devices()
+    if mac in devices:
+        devices[mac]["name"] = name
+        save_devices(devices)
+    return jsonify({"ok": True})
+
+# ── Registration Page ─────────────────────────────
+
+REGISTER_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Device Registration</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#0d0f0e; --surface:#141714; --border:#232623; --accent:#39ff8a; --accent2:#00c8ff; --text:#e8ede9; --muted:#5a6b5c; --danger:#ff4f4f; --radius:10px; --mono:'JetBrains Mono',monospace; --display:'Syne',sans-serif; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px; min-height:100vh; padding:40px 24px; }
+  header { display:flex; align-items:center; justify-content:space-between; margin-bottom:40px; padding-bottom:20px; border-bottom:1px solid var(--border); }
+  .logo { font-family:var(--display); font-size:26px; font-weight:800; }
+  .logo span { color:var(--accent); }
+  .back-btn { background:transparent; border:1px solid var(--border); border-radius:6px; color:var(--muted); font-family:var(--mono); font-size:12px; padding:6px 14px; cursor:pointer; text-decoration:none; transition:border-color .2s,color .2s; }
+  .back-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; margin-bottom:16px; }
+  .card-label { font-size:10px; text-transform:uppercase; letter-spacing:2px; color:var(--muted); margin-bottom:16px; }
+  .device-row { display:flex; align-items:center; gap:12px; padding:16px 0; border-bottom:1px solid var(--border); }
+  .device-row:last-child { border-bottom:none; }
+  .mac { font-size:14px; color:var(--accent2); min-width:180px; }
+  .ver { color:var(--muted); font-size:11px; min-width:60px; }
+  .last { color:var(--muted); font-size:11px; flex:1; }
+  .name-input { background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--mono); font-size:13px; padding:8px 12px; outline:none; transition:border-color .2s; width:200px; }
+  .name-input:focus { border-color:var(--accent); }
+  .name-input::placeholder { color:var(--muted); }
+  .save-btn { background:var(--accent); color:#000; border:none; border-radius:6px; font-family:var(--display); font-size:13px; font-weight:700; padding:8px 16px; cursor:pointer; transition:opacity .2s; white-space:nowrap; }
+  .save-btn:hover { opacity:.85; }
+  .empty { color:var(--muted); text-align:center; padding:32px; }
+  .toast { display:none; position:fixed; bottom:24px; right:24px; padding:12px 20px; border-radius:8px; font-size:13px; font-weight:600; z-index:999; }
+  .toast.success { background:var(--accent); color:#000; display:block; }
+  .toast.error { background:var(--danger); color:#fff; display:block; }
+  .count-badge { font-family:var(--display); font-size:32px; font-weight:800; color:var(--accent2); line-height:1; margin-bottom:4px; }
+  .count-sub { color:var(--muted); font-size:11px; margin-bottom:20px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">ESP32 <span>Cloud</span> OTA</div>
+  <a href="/" class="back-btn">← Back to dashboard</a>
+</header>
+
+<div class="card">
+  <div class="card-label">Unregistered devices</div>
+  <div class="count-badge" id="count">—</div>
+  <div class="count-sub">devices waiting to be named</div>
+  <div id="devices-list"><div class="empty">Loading...</div></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+function loadDevices() {
+  fetch('/devices/unnamed').then(r=>r.json()).then(devices=>{
+    const list = document.getElementById('devices-list');
+    document.getElementById('count').textContent = devices.length;
+    if(!devices.length){
+      list.innerHTML='<div class="empty">No unregistered devices — all devices are named ✓</div>';
+      return;
+    }
+    list.innerHTML = devices.map(d=>`
+      <div class="device-row" id="row-${d.mac.replace(/:/g,'')}">
+        <div class="mac">${d.mac}</div>
+        <div class="ver">v${d.version}</div>
+        <div class="last">Last seen: ${d.last_seen}</div>
+        <input class="name-input" id="inp-${d.mac.replace(/:/g,'')}" 
+               placeholder="Enter device name..." 
+               onkeydown="if(event.key==='Enter')saveName('${d.mac}')">
+        <button class="save-btn" onclick="saveName('${d.mac}')">Register</button>
+      </div>
+    `).join('');
+  });
+}
+
+function saveName(mac) {
+  const id = mac.replace(/:/g,'');
+  const name = document.getElementById('inp-'+id).value.trim();
+  if(!name){ toast('Enter a device name','error'); return; }
+
+  fetch('/devices/register', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({mac, name})
+  }).then(r=>r.json()).then(d=>{
+    if(d.ok){
+      toast(`${name} registered successfully`,'success');
+      document.getElementById('row-'+id).remove();
+      const count = document.getElementById('count');
+      count.textContent = parseInt(count.textContent) - 1;
+    } else {
+      toast(d.error||'Failed','error');
+    }
+  });
+}
+
+function toast(msg,type){
+  const t=document.getElementById('toast');
+  t.textContent=msg;t.className='toast '+type;
+  clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast',3500);
+}
+
+loadDevices();
+</script>
+</body>
+</html>"""
+
+@app.route("/register")
+@require_login
+def register_page():
+    return render_template_string(REGISTER_HTML)
+
+# ── Main Dashboard ────────────────────────────────
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -291,38 +472,35 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .progress-wrap.active { display:block; }
   .url-card { grid-column:1/-1; background:#0e3a2a; border:1px solid var(--accent); }
   .url-display { font-size:14px; color:var(--accent); margin-top:8px; word-break:break-all; }
-
-  /* Device table */
-  .devices-card { grid-column:1/-1; }
-  .device-count { font-family:var(--display); font-size:32px; font-weight:800; color:var(--accent2); line-height:1; margin-bottom:4px; }
-  .device-count-sub { color:var(--muted); font-size:11px; margin-bottom:16px; }
   .device-table { width:100%; border-collapse:collapse; }
   .device-table th { text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:2px; color:var(--muted); padding:8px 12px; border-bottom:1px solid var(--border); }
-  .device-table td { padding:12px 12px; border-bottom:1px solid var(--border); vertical-align:middle; }
+  .device-table td { padding:12px; border-bottom:1px solid var(--border); vertical-align:middle; }
   .device-table tr:last-child td { border-bottom:none; }
-  .device-name { font-family:var(--display); font-size:15px; font-weight:700; color:var(--text); }
+  .device-name { font-family:var(--display); font-size:15px; font-weight:700; }
   .device-mac { color:var(--muted); font-size:11px; margin-top:3px; }
   .status-online { display:inline-flex; align-items:center; gap:6px; color:var(--accent); font-size:12px; }
   .status-offline { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
-  .status-dot { width:7px; height:7px; border-radius:50%; }
-  .status-dot.online { background:var(--accent); animation:pulse 2s ease-in-out infinite; }
-  .status-dot.offline { background:var(--muted); }
+  .sdot { width:7px; height:7px; border-radius:50%; }
+  .sdot.on { background:var(--accent); animation:pulse 2s infinite; }
+  .sdot.off { background:var(--muted); }
   .ver-badge { display:inline-block; padding:3px 10px; border-radius:4px; font-size:11px; }
-  .ver-up-to-date { background:#0e3a2a; color:var(--accent); }
-  .ver-outdated { background:#2a1a0e; color:var(--warning); }
+  .up-to-date { background:#0e3a2a; color:var(--accent); }
+  .outdated { background:#2a1a0e; color:var(--warning); }
   .last-seen { color:var(--muted); font-size:11px; }
-  .empty-devices { color:var(--muted); text-align:center; padding:32px; }
-  .refresh-btn { background:transparent; border:1px solid var(--border); border-radius:6px; color:var(--muted); font-family:var(--mono); font-size:11px; padding:4px 12px; cursor:pointer; transition:border-color .2s; float:right; margin-top:-2px; }
-  .refresh-btn:hover { border-color:var(--accent2); color:var(--accent2); }
-
-  /* History */
+  .rename-btn { background:transparent; border:1px solid var(--border); border-radius:4px; color:var(--muted); font-family:var(--mono); font-size:11px; padding:3px 8px; cursor:pointer; transition:border-color .2s; }
+  .rename-btn:hover { border-color:var(--accent2); color:var(--accent2); }
+  .empty { color:var(--muted); text-align:center; padding:24px; }
+  .register-alert { display:none; background:#1a2e3a; border:1px solid var(--accent2); border-radius:8px; padding:12px 16px; margin-bottom:16px; font-size:12px; color:var(--accent2); }
+  .register-alert a { color:var(--accent2); font-weight:600; }
   .history-table { width:100%; border-collapse:collapse; }
   .history-table th { text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:2px; color:var(--muted); padding:8px 12px; border-bottom:1px solid var(--border); }
   .history-table td { padding:10px 12px; border-bottom:1px solid var(--border); }
   .history-table tr:last-child td { border-bottom:none; }
   .history-table tr:first-child td { color:var(--accent); }
   .badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; background:#0e3a2a; color:var(--accent); }
-  .empty { color:var(--muted); text-align:center; padding:24px; }
+  .devices-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
+  .refresh-btn { background:transparent; border:1px solid var(--border); border-radius:6px; color:var(--muted); font-family:var(--mono); font-size:11px; padding:4px 12px; cursor:pointer; transition:border-color .2s; }
+  .refresh-btn:hover { border-color:var(--accent2); color:var(--accent2); }
 </style>
 </head>
 <body>
@@ -333,8 +511,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <a href="/logout" class="logout-btn">Logout</a>
   </div>
 </header>
-<div class="grid">
 
+<div id="register-alert" class="register-alert">
+  📡 <span id="unregistered-count">0</span> new device(s) detected — 
+  <a href="/register">Go to registration page →</a>
+</div>
+
+<div class="grid">
   <div class="card url-card">
     <div class="card-label">Your cloud URL — use this in your ESP32 sketch</div>
     <div class="url-display" id="server-url"></div>
@@ -349,20 +532,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="card">
     <div class="card-label">ESP32 endpoints</div>
     <div class="endpoint-list">
-      <div class="endpoint"><span class="method get">GET</span><span>/version</span><span class="ep-desc">API key required</span></div>
-      <div class="endpoint"><span class="method get">GET</span><span>/firmware</span><span class="ep-desc">API key required</span></div>
+      <div class="endpoint"><span class="method get">GET</span><span>/version</span><span class="ep-desc">Version check</span></div>
+      <div class="endpoint"><span class="method get">GET</span><span>/firmware</span><span class="ep-desc">Download .bin</span></div>
       <div class="endpoint"><span class="method post">POST</span><span>/checkin</span><span class="ep-desc">Device registration</span></div>
-      <div class="endpoint"><span class="method post">POST</span><span>/upload</span><span class="ep-desc">Login required</span></div>
+      <div class="endpoint"><span class="method post">POST</span><span>/upload</span><span class="ep-desc">Upload firmware</span></div>
     </div>
   </div>
 
-  <!-- Devices -->
-  <div class="card devices-card">
-    <div class="card-label">
-      Connected devices
+  <!-- Named Devices -->
+  <div class="card full">
+    <div class="devices-header">
+      <div class="card-label" style="margin-bottom:0">Named devices</div>
       <button class="refresh-btn" onclick="loadDevices()">↻ Refresh</button>
     </div>
-    <div id="devices-container"><div class="empty-devices">No devices registered yet</div></div>
+    <div id="devices-container"><div class="empty">No named devices yet — <a href="/register" style="color:var(--accent2)">register your devices →</a></div></div>
   </div>
 
   <!-- Upload -->
@@ -387,9 +570,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="card-label">Upload history</div>
     <div id="history"><div class="empty">No uploads yet</div></div>
   </div>
-
 </div>
 <div class="toast" id="toast"></div>
+
 <script>
   document.getElementById('server-url').textContent = window.location.origin;
   let file = null;
@@ -445,56 +628,70 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
 
   function loadDevices(){
-    fetch('/devices').then(r=>r.json()).then(devices=>{
+    const serverVer = document.getElementById('ver-display').textContent.replace('v','');
+
+    // Check unnamed devices
+    fetch('/devices/unnamed').then(r=>r.json()).then(unnamed=>{
+      const alert = document.getElementById('register-alert');
+      const count = document.getElementById('unregistered-count');
+      if(unnamed.length > 0){
+        count.textContent = unnamed.length;
+        alert.style.display = 'block';
+      } else {
+        alert.style.display = 'none';
+      }
+    });
+
+    // Load named devices
+    fetch('/devices/named').then(r=>r.json()).then(devices=>{
       const c = document.getElementById('devices-container');
       if(!devices.length){
-        c.innerHTML='<div class="empty-devices">No devices registered yet — flash a device to see it here</div>';
+        c.innerHTML='<div class="empty">No named devices yet — <a href="/register" style="color:var(--accent2)">register your devices →</a></div>';
         return;
       }
+      c.innerHTML = `<table class="device-table">
+        <thead><tr><th>Device</th><th>Status</th><th>Firmware</th><th>Last seen</th><th></th></tr></thead>
+        <tbody>${devices.map(d=>{
+          const lastSeen = new Date(d.last_seen);
+          const diffMin  = Math.floor((new Date() - lastSeen) / 60000);
+          const isOnline = diffMin < 2;
+          const isUpToDate = d.version === serverVer;
+          return `<tr>
+            <td>
+              <div class="device-name">${d.name}</div>
+              <div class="device-mac">${d.mac}</div>
+            </td>
+            <td>
+              <span class="${isOnline?'status-online':'status-offline'}">
+                <span class="sdot ${isOnline?'on':'off'}"></span>
+                ${isOnline?'Online':'Offline'}
+              </span>
+            </td>
+            <td>
+              <span class="ver-badge ${isUpToDate?'up-to-date':'outdated'}">
+                v${d.version} ${isUpToDate?'✓':'↑ update available'}
+              </span>
+            </td>
+            <td class="last-seen">${d.last_seen}</td>
+            <td>
+              <button class="rename-btn" onclick="renameDevice('${d.mac}','${d.name}')">Rename</button>
+            </td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>`;
+    });
+  }
 
-      const serverVer = document.getElementById('ver-display').textContent.replace('v','');
-
-      c.innerHTML = `
-        <table class="device-table">
-          <thead>
-            <tr>
-              <th>Device</th>
-              <th>Status</th>
-              <th>Firmware</th>
-              <th>IP Address</th>
-              <th>Last seen</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${devices.map(d => {
-              const lastSeen = new Date(d.last_seen);
-              const now = new Date();
-              const diffMin = Math.floor((now - lastSeen) / 60000);
-              const isOnline = diffMin < 2;
-              const isUpToDate = d.version === serverVer;
-
-              return `<tr>
-                <td>
-                  <div class="device-name">${d.name}</div>
-                  <div class="device-mac">${d.mac}</div>
-                </td>
-                <td>
-                  <span class="${isOnline ? 'status-online' : 'status-offline'}">
-                    <span class="status-dot ${isOnline ? 'online' : 'offline'}"></span>
-                    ${isOnline ? 'Online' : 'Offline'}
-                  </span>
-                </td>
-                <td>
-                  <span class="ver-badge ${isUpToDate ? 'ver-up-to-date' : 'ver-outdated'}">
-                    v${d.version} ${isUpToDate ? '✓' : '↑ update available'}
-                  </span>
-                </td>
-                <td style="color:var(--muted);font-size:12px">${d.ip}</td>
-                <td class="last-seen">${d.last_seen}</td>
-              </tr>`;
-            }).join('')}
-          </tbody>
-        </table>`;
+  function renameDevice(mac, currentName){
+    const name = prompt(`Rename device (current: ${currentName}):`, currentName);
+    if(!name || name === currentName) return;
+    fetch('/devices/rename',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({mac, name})
+    }).then(r=>r.json()).then(d=>{
+      if(d.ok){ toast(`Renamed to ${name}`,'success'); loadDevices(); }
+      else toast(d.error||'Failed','error');
     });
   }
 
@@ -519,7 +716,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast',3500);
   }
 
-  // Auto refresh devices every 30 seconds
   loadVer();loadHistory();loadDevices();
   setInterval(loadDevices, 30000);
 </script>
