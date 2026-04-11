@@ -273,8 +273,8 @@ def upload_firmware():
     # Allow either login session OR upload API key
     upload_key = request.headers.get("X-Upload-Key")
     if not session.get("logged_in") and upload_key != API_KEY:
-        return redirect(url_for("login"))
-def upload_firmware():
+        return jsonify({"error": "Unauthorized"}), 401
+
     if "file" not in request.files:
         return jsonify({"error": "No file in request"}), 400
     file    = request.files["file"]
