@@ -269,7 +269,11 @@ def update_failed():
 # ── Browser Endpoints ─────────────────────────────
 
 @app.route("/upload", methods=["POST"])
-@require_login
+def upload_firmware():
+    # Allow either login session OR upload API key
+    upload_key = request.headers.get("X-Upload-Key")
+    if not session.get("logged_in") and upload_key != API_KEY:
+        return redirect(url_for("login"))
 def upload_firmware():
     if "file" not in request.files:
         return jsonify({"error": "No file in request"}), 400
