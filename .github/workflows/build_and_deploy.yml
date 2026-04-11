@@ -1,0 +1,56 @@
+name: Build and Deploy Firmware
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Install Arduino CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Install ESP32 board package
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+
+      - name: Install required libraries
+        run: |
+          arduino-cli lib install "ArduinoJson"
+
+      - name: Update version in sketch
+        run: |
+          sed -i 's/#define FW_VERSION.*"/#define FW_VERSION  "${{ steps.version.outputs.VERSION }}"/' esp32_firmware/esp32_ota_generic/esp32_ota_generic.ino
+
+      - name: Compile sketch
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --output-dir ./build \
+            esp32_firmware/esp32_ota_generic
+
+      - name: Upload firmware to server
+        run: |
+          curl -X POST ${{ secrets.OTA_SERVER_URL }}/upload \
+            -H "Cookie: session=${{ secrets.OTA_SESSION }}" \
+            -F "file=@./build/esp32_ota_generic.ino.bin" \
+            -F "version=${{ steps.version.outputs.VERSION }}"
+
+      - name: Confirm deployment
+        run: |
+          echo "Firmware v${{ steps.version.outputs.VERSION }} deployed successfully"
