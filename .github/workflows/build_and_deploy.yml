@@ -40,10 +40,9 @@ jobs:
         run: |
           sed -i 's/#define FW_VERSION.*"/#define FW_VERSION  "${{ steps.version.outputs.VERSION }}"/' esp32_firmware/esp32_ota_generic/esp32_ota_generic.ino
 
-      - name: Compile sketch
+      - - name: Compile sketch
         run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./build esp32_firmware/esp32_ota_generic
-
+          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./esp32_firmware/esp32_ota_generic/build esp32_firmware/esp32_ota_generic
       - name: Upload firmware to server
         env:
           OTA_SERVER_URL: ${{ secrets.OTA_SERVER_URL }}
@@ -52,7 +51,7 @@ jobs:
         run: |
           curl -X POST "$OTA_SERVER_URL/upload" \
             -H "X-Upload-Key: $OTA_API_KEY" \
-            -F "file=@./build/esp32_ota_generic.ino.bin" \
+            -F "file=@./esp32_firmware/esp32_ota_generic/build/esp32.esp32.esp32/esp32_ota_generic.ino.bin" \
             -F "version=$VERSION"
 
       - name: Confirm deployment
