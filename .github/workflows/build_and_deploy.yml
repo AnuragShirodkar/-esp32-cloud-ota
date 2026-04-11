@@ -19,14 +19,14 @@ jobs:
 
       - name: Install Arduino CLI
         run: |
-          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-          echo "$HOME/bin" >> $GITHUB_PATH
-          export PATH="$HOME/bin:$PATH"
-          arduino-cli version
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=$HOME/arduino-cli-bin sh
+          echo "$HOME/arduino-cli-bin" >> $GITHUB_PATH
+
+      - name: Verify Arduino CLI
+        run: arduino-cli version
 
       - name: Install ESP32 board package
         run: |
-          export PATH="$HOME/bin:$PATH"
           arduino-cli config init
           arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
@@ -34,7 +34,6 @@ jobs:
 
       - name: Install required libraries
         run: |
-          export PATH="$HOME/bin:$PATH"
           arduino-cli lib install "ArduinoJson"
 
       - name: Update version in sketch
@@ -43,7 +42,6 @@ jobs:
 
       - name: Compile sketch
         run: |
-          export PATH="$HOME/bin:$PATH"
           arduino-cli compile \
             --fqbn esp32:esp32:esp32 \
             --output-dir ./build \
